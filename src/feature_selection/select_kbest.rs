@@ -31,7 +31,9 @@ pub trait ScoreFunction: Send + Sync {
 /// is the within-group sum of squares. Higher F-values indicate stronger
 /// class separation. A feature with zero within-class variance and non-zero
 /// between-class variance scores positive infinity; a constant feature scores
-/// zero.
+/// zero. Null feature values are excluded per column, and the degrees of
+/// freedom are computed from the remaining observations. A feature with no
+/// non-null values, or with fewer than two observed target classes, is rejected.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -97,22 +99,45 @@ impl ScoreFunction for FClassif {
                 ))
             })?;
             let vals: Vec<Option<f64>> = ca.iter().collect();
-            let feature_vals: Vec<f64> = vals.iter().flatten().copied().collect();
-            let feature_mean = feature_vals.iter().sum::<f64>() / feature_vals.len() as f64;
+            let observed: Vec<(f64, f64)> = vals
+                .iter()
+                .zip(&y_vals)
+                .filter_map(|(xv, &yv)| xv.map(|value| (value, yv)))
+                .collect();
+            if observed.is_empty() {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has no non-null values. Impute or drop it first."
+                )));
+            }
+
+            let feature_mean =
+                observed.iter().map(|(value, _)| value).sum::<f64>() / observed.len() as f64;
+            let mut observed_classes: Vec<f64> =
+                observed.iter().map(|(_, target)| *target).collect();
+            observed_classes.sort_by(|a, b| a.total_cmp(b));
+            observed_classes.dedup();
+            if observed_classes.len() < 2 {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has only one target class after excluding nulls. \
+                     Impute or drop it first."
+                )));
+            }
 
             let mut ss_between = 0.0;
             let mut ss_within = 0.0;
 
-            for &cls in &classes {
-                let group_vals: Vec<f64> = vals
+            for &cls in &observed_classes {
+                let group_vals: Vec<f64> = observed
                     .iter()
-                    .zip(&y_vals)
-                    .filter_map(|(xv, &yv)| if (yv - cls).abs() < 1e-10 { *xv } else { None })
+                    .filter_map(|&(value, target)| {
+                        if (target - cls).abs() < 1e-10 {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
-                if group_vals.is_empty() {
-                    continue;
-                }
                 let g_mean = group_vals.iter().sum::<f64>() / group_vals.len() as f64;
                 let g_n = group_vals.len() as f64;
 
@@ -123,9 +148,10 @@ impl ScoreFunction for FClassif {
                 }
             }
 
-            let n_classes = classes.len() as f64;
+            let n_observed = observed.len() as f64;
+            let n_classes = observed_classes.len() as f64;
             let df_between = n_classes - 1.0;
-            let df_within = n - n_classes;
+            let df_within = n_observed - n_classes;
 
             let f_stat = if ss_within == 0.0 {
                 if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
@@ -356,6 +382,84 @@ mod tests {
         let scores = FClassif::new().score(&features, &target).unwrap();
 
         assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_classif_partial_null_uses_observed_degrees_of_freedom() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "partial".into(),
+                &[Some(0.0_f64), None, Some(2.0), Some(4.0)],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0].0, "partial");
+        assert!((scores[0].1 - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_select_kbest_ranks_partial_null_feature_by_observed_rows() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new(
+                    "partial".into(),
+                    &[Some(0.0_f64), None, Some(2.0), Some(4.0)],
+                )),
+                Column::from(Series::new("complete".into(), &[0.0_f64, 2.0, 3.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+        let y = DataFrame::new(4, vec![target]).unwrap();
+        let mut skb = SelectKBest::new(1, Box::new(FClassif::new()));
+
+        skb.fit(features.clone(), y).unwrap();
+
+        assert_eq!(skb.scores().unwrap()[0], ("complete".to_string(), 4.5));
+        assert_eq!(
+            skb.transform(features).unwrap().get_column_names(),
+            &["complete"]
+        );
+    }
+
+    #[test]
+    fn test_f_classif_all_null_feature_errors() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "all_null".into(),
+                &[None::<f64>; 4],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(error.to_string().contains("no non-null values"));
+    }
+
+    #[test]
+    fn test_f_classif_feature_with_one_observed_class_errors() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "one_class".into(),
+                &[Some(0.0_f64), Some(1.0), None, None],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(error.to_string().contains("only one target class"));
     }
 
     #[test]
