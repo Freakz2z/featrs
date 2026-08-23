@@ -106,6 +106,7 @@ pub mod prelude {
     pub use crate::preprocessing::winsorizer::Winsorizer;
     pub use crate::time_series::cyclical::CyclicalEncoder;
     pub use crate::time_series::diff::Difference;
+    pub use crate::time_series::expanding::ExpandingAggregator;
     pub use crate::time_series::lag::Lagger;
     pub use crate::time_series::rolling::RollingAggregator;
     pub use crate::traits::{Error, Fit, FitSupervised, FitTransform, Result, Transform};
