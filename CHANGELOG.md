@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ExpandingAggregator` for computing expanding (cumulative) window
+  statistics — mean, sum, min, max, and population standard deviation — where
+  the statistic at each row covers all rows up to and including it. New
+  `Float64` columns named `{column}_expanding_{function}` are appended; nulls
+  do not contribute to the accumulator but keep their row position in the
+  output, and `min_periods` (default `1`) controls how many non-null
+  observations are required before a value is produced (#62).
+
 ## [0.4.0] - 2026-08-22
 
 ### Added
