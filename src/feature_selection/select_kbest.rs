@@ -127,10 +127,10 @@ impl ScoreFunction for FClassif {
             let df_between = n_classes - 1.0;
             let df_within = n - n_classes;
 
-            let f_stat = if df_within <= 0.0 {
-                0.0
-            } else if ss_within == 0.0 {
+            let f_stat = if ss_within == 0.0 {
                 if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
+            } else if df_within <= 0.0 {
+                0.0
             } else {
                 (ss_between / df_between) / (ss_within / df_within)
             };
@@ -342,6 +342,20 @@ mod tests {
         assert_eq!(scores[0], ("constant".to_string(), 0.0));
         assert_eq!(scores[1].0, "perfect");
         assert_eq!(scores[1].1, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_f_classif_two_sample_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("perfect".into(), &[0.0_f64, 1.0]))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
     }
 
     #[test]
