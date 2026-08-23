@@ -14,6 +14,8 @@ pub trait ScoreFunction: Send + Sync {
     /// Score each feature in `x` against the target `y`.
     ///
     /// Returns a list of `(column_name, score)` pairs for numeric columns.
+    /// Scores may be positive infinity when a feature separates the target
+    /// perfectly. Equal scores retain their input-column order in [`SelectKBest`].
     fn score(&self, x: &DataFrame, y: &Column) -> Result<Vec<(String, f64)>>;
 }
 
@@ -27,7 +29,9 @@ pub trait ScoreFunction: Send + Sync {
 ///
 /// Where `SS_between` is the between-group sum of squares and `SS_within`
 /// is the within-group sum of squares. Higher F-values indicate stronger
-/// class separation.
+/// class separation. A feature with zero within-class variance and non-zero
+/// between-class variance scores positive infinity; a constant feature scores
+/// zero.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -57,8 +61,6 @@ impl ScoreFunction for FClassif {
         })?;
         let y_vals: Vec<f64> = y_ca.iter().flatten().collect();
         let n = y_vals.len() as f64;
-        let y_mean = y_vals.iter().sum::<f64>() / n;
-
         let mut classes: Vec<f64> = y_ca.iter().flatten().collect();
         classes.sort_by(|a, b| a.total_cmp(b));
         classes.dedup();
@@ -95,6 +97,8 @@ impl ScoreFunction for FClassif {
                 ))
             })?;
             let vals: Vec<Option<f64>> = ca.iter().collect();
+            let feature_vals: Vec<f64> = vals.iter().flatten().copied().collect();
+            let feature_mean = feature_vals.iter().sum::<f64>() / feature_vals.len() as f64;
 
             let mut ss_between = 0.0;
             let mut ss_within = 0.0;
@@ -112,7 +116,7 @@ impl ScoreFunction for FClassif {
                 let g_mean = group_vals.iter().sum::<f64>() / group_vals.len() as f64;
                 let g_n = group_vals.len() as f64;
 
-                ss_between += g_n * (g_mean - y_mean).powi(2);
+                ss_between += g_n * (g_mean - feature_mean).powi(2);
 
                 for &v in &group_vals {
                     ss_within += (v - g_mean).powi(2);
@@ -123,10 +127,12 @@ impl ScoreFunction for FClassif {
             let df_between = n_classes - 1.0;
             let df_within = n - n_classes;
 
-            let f_stat = if ss_within > 1e-15 && df_within > 0.0 {
-                (ss_between / df_between) / (ss_within / df_within)
-            } else {
+            let f_stat = if df_within <= 0.0 {
                 0.0
+            } else if ss_within == 0.0 {
+                if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
+            } else {
+                (ss_between / df_between) / (ss_within / df_within)
             };
 
             scores.push((name, f_stat));
@@ -317,6 +323,73 @@ mod tests {
 
         let scores = f.score(&features, &y_col).unwrap();
         assert_eq!(scores.len(), 2);
+    }
+
+    #[test]
+    fn test_f_classif_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new("constant".into(), &[5.0_f64; 4])),
+                Column::from(Series::new("perfect".into(), &[0.0_f64, 0.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0], ("constant".to_string(), 0.0));
+        assert_eq!(scores[1].0, "perfect");
+        assert_eq!(scores[1].1, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_select_kbest_ranks_perfect_separator_first() {
+        let features = DataFrame::new(
+            6,
+            vec![
+                make_features().column("signal").unwrap().clone(),
+                Column::from(Series::new(
+                    "perfect".into(),
+                    &[0.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0],
+                )),
+            ],
+        )
+        .unwrap();
+        let y = DataFrame::new(6, vec![make_target_col()]).unwrap();
+        let mut skb = SelectKBest::new(1, Box::new(FClassif::new()));
+
+        skb.fit(features.clone(), y).unwrap();
+
+        assert_eq!(skb.scores().unwrap()[0].0, "perfect");
+        let selected = skb.transform(features).unwrap();
+        assert_eq!(selected.get_column_names(), &["perfect"]);
+    }
+
+    #[test]
+    fn test_select_kbest_breaks_infinite_ties_by_input_order() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new("first".into(), &[0.0_f64, 0.0, 1.0, 1.0])),
+                Column::from(Series::new("second".into(), &[2.0_f64, 2.0, 3.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+        let y = DataFrame::new(4, vec![target]).unwrap();
+        let mut skb = SelectKBest::new(2, Box::new(FClassif::new()));
+
+        skb.fit(features, y).unwrap();
+
+        let names: Vec<&str> = skb
+            .scores()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["first", "second"]);
     }
 
     #[test]
