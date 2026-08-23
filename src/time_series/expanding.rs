@@ -43,7 +43,8 @@ pub enum ExpandingFn {
 /// New `Float64` columns named `{column}_expanding_{function}` are appended.
 /// If a column with a generated name already exists in the input, it is
 /// replaced (polars `with_column` semantics); otherwise existing columns
-/// pass through unchanged.
+/// pass through unchanged. Configured columns must be `Float64`; this is
+/// validated at fit time.
 ///
 /// # Example
 ///
@@ -167,10 +168,14 @@ impl Fit<DataFrame> for ExpandingAggregator {
             )));
         }
         for col in &self.columns {
-            if x.column(col.as_str()).is_err() {
+            let c = x.column(col.as_str()).map_err(|_| {
+                Error::InvalidInput(format!("ExpandingAggregator: column '{}' not found.", col))
+            })?;
+            if c.dtype() != &DataType::Float64 {
                 return Err(Error::InvalidInput(format!(
-                    "ExpandingAggregator: column '{}' not found.",
-                    col
+                    "ExpandingAggregator: column '{}' has dtype {}; expected Float64.",
+                    col,
+                    c.dtype()
                 )));
             }
         }
@@ -189,7 +194,11 @@ impl Transform<DataFrame> for ExpandingAggregator {
         let mut out = x.clone();
 
         for col in &self.columns {
-            let s = out
+            // Snapshot each source from the immutable input `x`, not the
+            // growing output `out`: a generated name can collide with a
+            // configured column (e.g. `"x"` and `"x_expanding_mean"`), and
+            // reading from `out` would then aggregate the derived values.
+            let s = x
                 .column(col.as_str())
                 .map_err(|e| {
                     Error::InvalidInput(format!(
@@ -398,13 +407,46 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_non_f64_column_errors() {
+    fn test_fit_non_f64_column_errors() {
         let col = Column::from(Series::new("x".into(), &["a", "b"]));
         let df = DataFrame::new(2, vec![col]).unwrap();
         let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
-        e.fit(df.clone()).unwrap();
-        let err = e.transform(df).unwrap_err();
+        let err = e.fit(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_generated_name_collision_uses_original_input() {
+        // Configured column names can coincide with generated names: with
+        // `["x", "x_expanding_mean"]`, processing "x" first appends
+        // `x_expanding_mean` (replacing the input column of that name). The
+        // second configured column must then aggregate the ORIGINAL
+        // `x_expanding_mean` input values, not the values just derived from
+        // "x" — reading sources from the growing output frame would yield
+        // [1, 1.25, 1.5] here instead of [10, 15, 20].
+        let a = Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0]));
+        let b = Column::from(Series::new(
+            "x_expanding_mean".into(),
+            &[10.0_f64, 20.0, 30.0],
+        ));
+        let df = DataFrame::new(3, vec![a, b]).unwrap();
+        let mut e = ExpandingAggregator::new(&["x", "x_expanding_mean"], ExpandingFn::Mean);
+        e.fit(df.clone()).unwrap();
+        let result = e.transform(df).unwrap();
+
+        let derived = result.column("x_expanding_mean").unwrap().f64().unwrap();
+        assert_relative_eq!(derived.get(0).unwrap(), 1.0, epsilon = 1e-9);
+        assert_relative_eq!(derived.get(1).unwrap(), 1.5, epsilon = 1e-9);
+        assert_relative_eq!(derived.get(2).unwrap(), 2.0, epsilon = 1e-9);
+
+        let from_original = result
+            .column("x_expanding_mean_expanding_mean")
+            .unwrap()
+            .f64()
+            .unwrap();
+        assert_relative_eq!(from_original.get(0).unwrap(), 10.0, epsilon = 1e-9);
+        assert_relative_eq!(from_original.get(1).unwrap(), 15.0, epsilon = 1e-9);
+        assert_relative_eq!(from_original.get(2).unwrap(), 20.0, epsilon = 1e-9);
     }
 
     fn run_on_nulled(vals: &[Option<f64>], function: ExpandingFn) -> DataFrame {
