@@ -31,9 +31,10 @@ pub trait ScoreFunction: Send + Sync {
 /// is the within-group sum of squares. Higher F-values indicate stronger
 /// class separation. A feature with zero within-class variance and non-zero
 /// between-class variance scores positive infinity; a constant feature scores
-/// zero. Null feature values are excluded per column, and the degrees of
-/// freedom are computed from the remaining observations. A feature with no
-/// non-null values, or with fewer than two observed target classes, is rejected.
+/// zero. Rows with a null feature value or null target are excluded per column,
+/// and the degrees of freedom are computed from the remaining observations. A
+/// feature with no usable values, or with fewer than two observed target
+/// classes, is rejected.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -61,8 +62,7 @@ impl ScoreFunction for FClassif {
                 y.dtype()
             ))
         })?;
-        let y_vals: Vec<f64> = y_ca.iter().flatten().collect();
-        let n = y_vals.len() as f64;
+        let y_vals: Vec<Option<f64>> = y_ca.iter().collect();
         let mut classes: Vec<f64> = y_ca.iter().flatten().collect();
         classes.sort_by(|a, b| a.total_cmp(b));
         classes.dedup();
@@ -75,11 +75,11 @@ impl ScoreFunction for FClassif {
             )));
         }
 
-        if n != x.height() as f64 {
+        if y_vals.len() != x.height() {
             return Err(Error::InvalidInput(format!(
                 "FClassif: feature rows ({}) and target rows ({}) don't match.",
                 x.height(),
-                n
+                y_vals.len()
             )));
         }
 
@@ -102,7 +102,10 @@ impl ScoreFunction for FClassif {
             let observed: Vec<(f64, f64)> = vals
                 .iter()
                 .zip(&y_vals)
-                .filter_map(|(xv, &yv)| xv.map(|value| (value, yv)))
+                .filter_map(|(&xv, &yv)| match (xv, yv) {
+                    (Some(value), Some(target)) => Some((value, target)),
+                    _ => None,
+                })
                 .collect();
             if observed.is_empty() {
                 return Err(Error::InvalidInput(format!(
@@ -487,6 +490,51 @@ mod tests {
 
         assert_eq!(scores[0].0, "partial");
         assert!((scores[0].1 - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_f_classif_null_target_preserves_row_alignment() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "aligned".into(),
+                &[0.0_f64, 1_000.0, 2.0, 4.0],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[Some(0.0_f64), None, Some(1.0), Some(1.0)],
+        ));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0].0, "aligned");
+        assert!((scores[0].1 - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_f_classif_validates_physical_target_row_count() {
+        let features = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "feature".into(),
+                &[0.0_f64, 1.0, 2.0],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[Some(0.0_f64), None, Some(1.0), Some(1.0)],
+        ));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("feature rows (3) and target rows (4) don't match")
+        );
     }
 
     #[test]

@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FClassif` now uses centered accumulation for ANOVA means and sums of
   squares, so decimal-valued constant features score `0.0`, decimal-valued
   perfect separators score positive infinity, and small real variance remains
-  distinguishable at large offsets (#147).
+  distinguishable at large offsets. Null target rows are excluded without
+  losing alignment with their corresponding feature rows (#147).
 
 ## [0.4.0] - 2026-08-22
 
