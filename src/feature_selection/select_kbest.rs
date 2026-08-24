@@ -110,8 +110,13 @@ impl ScoreFunction for FClassif {
                 )));
             }
 
-            let feature_mean =
-                observed.iter().map(|(value, _)| value).sum::<f64>() / observed.len() as f64;
+            let feature_origin = observed[0].0;
+            let feature_mean = feature_origin
+                + observed
+                    .iter()
+                    .map(|(value, _)| value - feature_origin)
+                    .sum::<f64>()
+                    / observed.len() as f64;
             let mut observed_classes: Vec<f64> =
                 observed.iter().map(|(_, target)| *target).collect();
             observed_classes.sort_by(|a, b| a.total_cmp(b));
@@ -138,7 +143,13 @@ impl ScoreFunction for FClassif {
                     })
                     .collect();
 
-                let g_mean = group_vals.iter().sum::<f64>() / group_vals.len() as f64;
+                let group_origin = group_vals[0];
+                let g_mean = group_origin
+                    + group_vals
+                        .iter()
+                        .map(|value| value - group_origin)
+                        .sum::<f64>()
+                        / group_vals.len() as f64;
                 let g_n = group_vals.len() as f64;
 
                 ss_between += g_n * (g_mean - feature_mean).powi(2);
@@ -152,18 +163,9 @@ impl ScoreFunction for FClassif {
             let n_classes = observed_classes.len() as f64;
             let df_between = n_classes - 1.0;
             let df_within = n_observed - n_classes;
-            // Means of decimal values can leave round-off residue in sums of
-            // squares that are mathematically zero. Scale the tolerance to
-            // the feature's squared magnitude and accumulation length.
-            let squared_scale = observed.iter().map(|(value, _)| value.powi(2)).sum::<f64>();
-            let zero_tolerance = f64::EPSILON.powi(2) * n_observed * squared_scale;
 
-            let f_stat = if ss_within <= zero_tolerance {
-                if ss_between > zero_tolerance {
-                    f64::INFINITY
-                } else {
-                    0.0
-                }
+            let f_stat = if ss_within == 0.0 {
+                if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
             } else if df_within <= 0.0 {
                 0.0
             } else {
@@ -428,12 +430,16 @@ mod tests {
     }
 
     #[test]
-    fn test_f_classif_tolerance_preserves_small_real_variance_at_large_scale() {
+    fn test_f_classif_preserves_one_ulp_variance_at_large_scale() {
+        let low = 1.0e9_f64;
+        let low_next = f64::from_bits(low.to_bits() + 1);
+        let high = low + 1_000.0;
+        let high_next = f64::from_bits(high.to_bits() + 1);
         let features = DataFrame::new(
             4,
             vec![Column::from(Series::new(
                 "varying".into(),
-                &[1.0e9_f64, 1.0e9 + 0.001, 1.0e9 + 0.002, 1.0e9 + 0.003],
+                &[low, low_next, high, high_next],
             ))],
         )
         .unwrap();
