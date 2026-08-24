@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output, and `min_periods` (default `1`) controls how many non-null
   observations are required before a value is produced (#62).
 
+### Fixed
+
+- `FClassif` now uses a scale-relative tolerance for mathematically zero
+  ANOVA sums of squares, so decimal-valued constant features score `0.0` and
+  decimal-valued perfect separators score positive infinity (#147).
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

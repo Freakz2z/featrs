@@ -152,9 +152,18 @@ impl ScoreFunction for FClassif {
             let n_classes = observed_classes.len() as f64;
             let df_between = n_classes - 1.0;
             let df_within = n_observed - n_classes;
+            // Means of decimal values can leave round-off residue in sums of
+            // squares that are mathematically zero. Scale the tolerance to
+            // the feature's squared magnitude and accumulation length.
+            let squared_scale = observed.iter().map(|(value, _)| value.powi(2)).sum::<f64>();
+            let zero_tolerance = f64::EPSILON.powi(2) * n_observed * squared_scale;
 
-            let f_stat = if ss_within == 0.0 {
-                if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
+            let f_stat = if ss_within <= zero_tolerance {
+                if ss_between > zero_tolerance {
+                    f64::INFINITY
+                } else {
+                    0.0
+                }
             } else if df_within <= 0.0 {
                 0.0
             } else {
@@ -382,6 +391,58 @@ mod tests {
         let scores = FClassif::new().score(&features, &target).unwrap();
 
         assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_classif_decimal_constant_scores_zero() {
+        let features = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "constant".into(),
+                &[0.1_f64, 0.1, 0.1],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("constant".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn test_f_classif_decimal_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            5,
+            vec![Column::from(Series::new(
+                "perfect".into(),
+                &[0.1_f64, 0.1, 0.1, 0.2, 0.2],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_classif_tolerance_preserves_small_real_variance_at_large_scale() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "varying".into(),
+                &[1.0e9_f64, 1.0e9 + 0.001, 1.0e9 + 0.002, 1.0e9 + 0.003],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert!(scores[0].1.is_finite());
+        assert!(scores[0].1 > 0.0);
     }
 
     #[test]
