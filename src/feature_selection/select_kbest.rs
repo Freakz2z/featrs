@@ -111,12 +111,11 @@ impl ScoreFunction for FClassif {
             }
 
             let feature_origin = observed[0].0;
-            let feature_mean = feature_origin
-                + observed
-                    .iter()
-                    .map(|(value, _)| value - feature_origin)
-                    .sum::<f64>()
-                    / observed.len() as f64;
+            let feature_mean_offset = observed
+                .iter()
+                .map(|(value, _)| value - feature_origin)
+                .sum::<f64>()
+                / observed.len() as f64;
             let mut observed_classes: Vec<f64> =
                 observed.iter().map(|(_, target)| *target).collect();
             observed_classes.sort_by(|a, b| a.total_cmp(b));
@@ -144,18 +143,19 @@ impl ScoreFunction for FClassif {
                     .collect();
 
                 let group_origin = group_vals[0];
-                let g_mean = group_origin
-                    + group_vals
-                        .iter()
-                        .map(|value| value - group_origin)
-                        .sum::<f64>()
-                        / group_vals.len() as f64;
                 let g_n = group_vals.len() as f64;
+                let group_mean_offset = group_vals
+                    .iter()
+                    .map(|value| value - group_origin)
+                    .sum::<f64>()
+                    / g_n;
+                let group_to_feature_mean =
+                    (group_origin - feature_origin) + group_mean_offset - feature_mean_offset;
 
-                ss_between += g_n * (g_mean - feature_mean).powi(2);
+                ss_between += g_n * group_to_feature_mean.powi(2);
 
                 for &v in &group_vals {
-                    ss_within += (v - g_mean).powi(2);
+                    ss_within += ((v - group_origin) - group_mean_offset).powi(2);
                 }
             }
 
@@ -449,6 +449,26 @@ mod tests {
 
         assert!(scores[0].1.is_finite());
         assert!(scores[0].1 > 0.0);
+    }
+
+    #[test]
+    fn test_f_classif_keeps_half_ulp_means_centered() {
+        let base = 1.0e16_f64;
+        let next = f64::from_bits(base.to_bits() + 1);
+        let next_next = f64::from_bits(base.to_bits() + 2);
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "centered".into(),
+                &[base, next, next, next_next],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("centered".to_string(), 2.0)]);
     }
 
     #[test]
